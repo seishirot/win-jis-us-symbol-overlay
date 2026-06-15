@@ -1,0 +1,20 @@
+# Local logs and self-test output
+*.log
+selftest-*.log
+
+# Local-only notes
+.local/
+local/
+personal/
+work/
+
+# Generated/path-specific Windows artifacts
+*.lnk
+Thumbs.db
+Desktop.ini
+
+# Editor artifacts
+.vscode/
+.idea/
+*.swp
+*~
