@@ -187,6 +187,12 @@ Install at logon with CapsLock-as-Ctrl enabled:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-overlay.ps1" -CapsLockAsCtrl -Install
 ```
 
+Install at logon with US overlay ON and CapsLock-as-Ctrl enabled:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-overlay.ps1" -StartMode US -CapsLockAsCtrl -Install
+```
+
 Uninstall future autostart:
 
 ```powershell
@@ -201,6 +207,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-ove
   shortcut in the current user's Startup folder.
 - `-Install` stores the current script path. Move the folder before installing,
   or uninstall/reinstall after moving it.
+- `-StartMode US -Install` persists US overlay ON in the autostart command;
+  without `-StartMode US`, installed autostart uses the safe JIS/OFF default.
 - `-CreateShortcuts` stores the current script path in the generated `.lnk`.
   Rerun it after moving the folder.
 - `-CapsLockAsCtrl -Install` persists CapsLock-as-Ctrl in the autostart command.

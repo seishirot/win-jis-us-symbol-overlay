@@ -134,12 +134,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-ove
 
 `-Install` stores the current script path in a current-user scheduled task. If
 scheduled task registration is blocked, it falls back to a shortcut in the
-current user's Startup folder. Installed autostart begins in JIS/OFF mode.
+current user's Startup folder. Installed autostart begins in JIS/OFF mode unless
+you pass `-StartMode US`.
 
-To install autostart with CapsLock-as-Ctrl enabled:
+To install autostart with US overlay ON and CapsLock-as-Ctrl enabled:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-overlay.ps1" -CapsLockAsCtrl -Install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-overlay.ps1" -StartMode US -CapsLockAsCtrl -Install
 ```
 
 Uninstall future autostart:

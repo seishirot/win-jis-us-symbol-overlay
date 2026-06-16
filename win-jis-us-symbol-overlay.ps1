@@ -165,7 +165,7 @@ function Install-WinJisUsSymbolOverlayDaemon {
 
     $powerShellPath = Get-WindowsPowerShellPath
     $iconPath = Get-IconPathForScript -ScriptPath $scriptPath
-    $arguments = New-DaemonArguments -ScriptPath $scriptPath -CapsLockAsCtrl ([bool]$CapsLockAsCtrl) -SymbolWidth $SymbolWidth
+    $arguments = New-DaemonArguments -ScriptPath $scriptPath -StartMode $StartMode -CapsLockAsCtrl ([bool]$CapsLockAsCtrl) -SymbolWidth $SymbolWidth
 
     try {
         $action = New-ScheduledTaskAction -Execute $powerShellPath -Argument $arguments
@@ -425,6 +425,8 @@ namespace WinJisUsSymbolOverlay
         public const int VK_F12 = 0x7B;
         public const int VK_CAPITAL = 0x14;
 
+        public const ushort SC_LEFT_CONTROL = 0x1D;
+
         public const int LLKHF_EXTENDED = 0x01;
         public const int LLKHF_LOWER_IL_INJECTED = 0x02;
         public const int LLKHF_INJECTED = 0x10;
@@ -432,8 +434,10 @@ namespace WinJisUsSymbolOverlay
         public const int LLKHF_UP = 0x80;
 
         public const int INPUT_KEYBOARD = 1;
+        public const int KEYEVENTF_EXTENDEDKEY = 0x0001;
         public const int KEYEVENTF_KEYUP = 0x0002;
         public const int KEYEVENTF_UNICODE = 0x0004;
+        public const int KEYEVENTF_SCANCODE = 0x0008;
 
         public const uint MOD_ALT = 0x0001;
         public const uint MOD_CONTROL = 0x0002;
@@ -1415,7 +1419,7 @@ namespace WinJisUsSymbolOverlay
                         return true;
                     }
 
-                    if (!SendVirtualKey(NativeMethods.VK_LCONTROL, false, "CapsLock as Ctrl down"))
+                    if (!SendKeyboardScanCode(NativeMethods.SC_LEFT_CONTROL, false, false, "CapsLock as Ctrl down"))
                     {
                         capsLockPassThrough = true;
                         return false;
@@ -1461,7 +1465,7 @@ namespace WinJisUsSymbolOverlay
                 return;
             }
 
-            if (SendVirtualKey(NativeMethods.VK_LCONTROL, false, reason))
+            if (SendKeyboardScanCode(NativeMethods.SC_LEFT_CONTROL, false, false, reason))
             {
                 capsLockCtrlDown = true;
                 capsLockCtrlReleasePending = false;
@@ -1487,7 +1491,7 @@ namespace WinJisUsSymbolOverlay
                 return false;
             }
 
-            if (SendVirtualKey(NativeMethods.VK_LCONTROL, true, reason))
+            if (SendKeyboardScanCode(NativeMethods.SC_LEFT_CONTROL, false, true, reason))
             {
                 capsLockCtrlDown = false;
                 capsLockCtrlReleasePending = false;
@@ -1535,13 +1539,23 @@ namespace WinJisUsSymbolOverlay
             Logger.Write("CapsLock as Ctrl release pending. reason=" + reason);
         }
 
-        private static bool SendVirtualKey(int virtualKey, bool keyUp, string reason)
+        private static bool SendKeyboardScanCode(ushort scanCode, bool extended, bool keyUp, string reason)
         {
             NativeMethods.INPUT[] inputs = new NativeMethods.INPUT[1];
             inputs[0].type = NativeMethods.INPUT_KEYBOARD;
-            inputs[0].U.ki.wVk = (ushort)virtualKey;
-            inputs[0].U.ki.wScan = 0;
-            inputs[0].U.ki.dwFlags = (uint)(keyUp ? NativeMethods.KEYEVENTF_KEYUP : 0);
+            inputs[0].U.ki.wVk = 0;
+            inputs[0].U.ki.wScan = scanCode;
+            inputs[0].U.ki.dwFlags = NativeMethods.KEYEVENTF_SCANCODE;
+            if (extended)
+            {
+                inputs[0].U.ki.dwFlags |= NativeMethods.KEYEVENTF_EXTENDEDKEY;
+            }
+
+            if (keyUp)
+            {
+                inputs[0].U.ki.dwFlags |= NativeMethods.KEYEVENTF_KEYUP;
+            }
+
             inputs[0].U.ki.time = 0;
             inputs[0].U.ki.dwExtraInfo = IntPtr.Zero;
 
@@ -1555,7 +1569,7 @@ namespace WinJisUsSymbolOverlay
             if ((now - lastSendInputFailureUtc).TotalSeconds > 5)
             {
                 lastSendInputFailureUtc = now;
-                Logger.Write("SendInput virtual key failed. reason=" + reason + " vk=" + virtualKey.ToString("X2") + " keyUp=" + keyUp.ToString() + " sent=" + sent.ToString() + " error=" + Marshal.GetLastWin32Error().ToString());
+                Logger.Write("SendInput scan code failed. reason=" + reason + " scanCode=" + scanCode.ToString("X2") + " extended=" + extended.ToString() + " keyUp=" + keyUp.ToString() + " sent=" + sent.ToString() + " error=" + Marshal.GetLastWin32Error().ToString());
             }
 
             return false;
@@ -1933,6 +1947,7 @@ namespace WinJisUsSymbolOverlay
             menu.Items.Add(offItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(capsCtrlItem);
+            menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(symbolWidthAutoItem);
             menu.Items.Add(symbolWidthAsciiItem);
             menu.Items.Add(symbolWidthFullwidthItem);
