@@ -10,6 +10,7 @@ The intended v1 behavior is manual switching:
 - US overlay ON when using a US physical keyboard.
 - US overlay OFF when using a JIS physical keyboard.
 - Optional CapsLock-as-Ctrl remapping for users who prefer Ctrl on CapsLock.
+- Ctrl shortcut overlay for fixed US OEM symbol keys while US overlay is ON.
 - Symbol width mode `Auto` by default, with manual `ASCII` and `Fullwidth`
   overrides.
 - Fullwidth style `Japanese` by default, with `Literal` available for plain
@@ -31,6 +32,7 @@ The daemon is implemented as `win-jis-us-symbol-overlay.ps1`:
 - `SetWindowsHookEx` with `WH_KEYBOARD_LL` for low-level keyboard observation.
 - `KBDLLHOOKSTRUCT.scanCode` for physical key-position mapping.
 - `SendInput` with Unicode key events to emit the corrected symbol.
+- `SendInput` with `VK_OEM_*` key events for the narrow Ctrl shortcut overlay.
 - `RegisterHotKey` for `Ctrl+Alt+F12` toggle.
 - `NotifyIcon` for tray UI.
 - Thin `.vbs` wrapper for no-console double-click startup.
@@ -121,6 +123,31 @@ While US overlay is ON, these mappings apply globally to the current user
 desktop. Users must switch the overlay OFF before using a JIS physical keyboard
 normally.
 
+## Ctrl Shortcut Overlay
+
+`-ShortcutOverlay On` is the default. While US overlay is ON and `Ctrl` is held,
+the daemon remaps only fixed unextended US OEM symbol-key positions to matching
+Windows virtual-key events. It does not use Unicode character injection for
+these shortcut chords.
+
+```text
+Physical       Shortcut virtual key
+SC00C          VK_OEM_MINUS
+SC00D          VK_OEM_PLUS
+SC01A          VK_OEM_4
+SC01B          VK_OEM_6
+SC02B          VK_OEM_5
+SC027          VK_OEM_1
+SC028          VK_OEM_7
+SC029          VK_OEM_3
+SC035          VK_OEM_2
+```
+
+`Alt`, `Win`, and `Ctrl+Alt` chords are left alone in v1. Shift-number symbols
+are also left alone for shortcut overlay. The implementation stores the target
+virtual key from keydown through keyup so cleanup still happens if Ctrl is
+released before the symbol key.
+
 ## Commands
 
 Self-test:
@@ -179,6 +206,12 @@ PowerShell equivalent for literal fullwidth symbols:
 powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-overlay.ps1" -StartMode US -SymbolWidth Fullwidth -FullwidthStyle Literal
 ```
 
+Disable shortcut overlay:
+
+```powershell
+powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-overlay.ps1" -StartMode US -ShortcutOverlay Off
+```
+
 Capture foreground IME diagnostics:
 
 1. Start the daemon.
@@ -228,6 +261,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-ove
 - `-CreateShortcuts` stores the current script path in the generated `.lnk`.
   Rerun it after moving the folder.
 - `-CapsLockAsCtrl -Install` persists CapsLock-as-Ctrl in the autostart command.
+- Non-default `-SymbolWidth` and `-FullwidthStyle` values are also persisted in
+  generated install and shortcut commands.
+- `-ShortcutOverlay Off` persists disabled shortcut overlay in generated
+  install and shortcut commands; otherwise shortcut overlay defaults to ON.
 - `-Uninstall` removes autostart entries only; it does not stop the current tray
   process.
 - Logs default to `%LOCALAPPDATA%\win-jis-us-symbol-overlay\daemon.log`.
@@ -235,8 +272,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-ove
   errors.
 - User-triggered `IME diagnostics` may log technical IME/window metadata such as
   process name, PID/TID, HWND, window class, HKL, IMM flags, and decision reason.
-- Never log typed text, window titles, URLs, clipboard contents, command lines,
-  full filesystem paths, or application contents.
+  It must not log typed text, window titles, URLs, clipboard contents, command
+  lines, full filesystem paths, or application contents.
+- Operational error logs may include local paths when a local file operation
+  fails. Redact logs before posting public issues.
 
 ## Validation
 
@@ -248,5 +287,5 @@ Remove-Item -LiteralPath .\selftest-sta.log -Force
 ```
 
 The self-test verifies embedded C# compilation, native structure definitions,
-and pure key-mapping cases. Manual behavior still requires an interactive
-Windows desktop test.
+pure key-mapping cases, and shortcut-overlay state transitions. Manual behavior
+still requires an interactive Windows desktop test.

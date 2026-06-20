@@ -10,6 +10,9 @@ param(
     [ValidateSet("Japanese", "Literal")]
     [string]$FullwidthStyle = "Japanese",
 
+    [ValidateSet("On", "Off")]
+    [string]$ShortcutOverlay = "On",
+
     [switch]$Install,
     [switch]$Uninstall,
     [switch]$CreateShortcuts,
@@ -78,7 +81,10 @@ function New-DaemonArguments {
         [string]$SymbolWidth = "Auto",
 
         [ValidateSet("Japanese", "Literal")]
-        [string]$FullwidthStyle = "Japanese"
+        [string]$FullwidthStyle = "Japanese",
+
+        [ValidateSet("On", "Off")]
+        [string]$ShortcutOverlay = "On"
     )
 
     $arguments = '-STA -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $ScriptPath
@@ -96,6 +102,10 @@ function New-DaemonArguments {
 
     if ($FullwidthStyle -ne "Japanese") {
         $arguments += " -FullwidthStyle $FullwidthStyle"
+    }
+
+    if ($ShortcutOverlay -ne "On") {
+        $arguments += " -ShortcutOverlay $ShortcutOverlay"
     }
 
     return $arguments
@@ -175,7 +185,7 @@ function Install-WinJisUsSymbolOverlayDaemon {
 
     $powerShellPath = Get-WindowsPowerShellPath
     $iconPath = Get-IconPathForScript -ScriptPath $scriptPath
-    $arguments = New-DaemonArguments -ScriptPath $scriptPath -StartMode $StartMode -CapsLockAsCtrl ([bool]$CapsLockAsCtrl) -SymbolWidth $SymbolWidth -FullwidthStyle $FullwidthStyle
+    $arguments = New-DaemonArguments -ScriptPath $scriptPath -StartMode $StartMode -CapsLockAsCtrl ([bool]$CapsLockAsCtrl) -SymbolWidth $SymbolWidth -FullwidthStyle $FullwidthStyle -ShortcutOverlay $ShortcutOverlay
 
     try {
         $action = New-ScheduledTaskAction -Execute $powerShellPath -Argument $arguments
@@ -230,7 +240,7 @@ function New-WinJisUsSymbolOverlayLaunchShortcuts {
         -ShortcutPath (Join-Path $scriptDir "win-jis-us-symbol-overlay.lnk") `
         -ScriptPath $scriptPath `
         -PowerShellPath $powerShellPath `
-        -Arguments (New-DaemonArguments -ScriptPath $scriptPath -StartMode US -CapsLockAsCtrl $true -SymbolWidth $SymbolWidth -FullwidthStyle $FullwidthStyle) `
+        -Arguments (New-DaemonArguments -ScriptPath $scriptPath -StartMode US -CapsLockAsCtrl $true -SymbolWidth $SymbolWidth -FullwidthStyle $FullwidthStyle -ShortcutOverlay $ShortcutOverlay) `
         -Description "Start win-jis-us-symbol-overlay with US overlay ON" `
         -IconPath $iconPath
 }
@@ -440,6 +450,15 @@ namespace WinJisUsSymbolOverlay
         public const int VK_RWIN = 0x5C;
         public const int VK_F12 = 0x7B;
         public const int VK_CAPITAL = 0x14;
+        public const int VK_OEM_1 = 0xBA;
+        public const int VK_OEM_PLUS = 0xBB;
+        public const int VK_OEM_MINUS = 0xBD;
+        public const int VK_OEM_2 = 0xBF;
+        public const int VK_OEM_3 = 0xC0;
+        public const int VK_OEM_4 = 0xDB;
+        public const int VK_OEM_5 = 0xDC;
+        public const int VK_OEM_6 = 0xDD;
+        public const int VK_OEM_7 = 0xDE;
 
         public const ushort SC_LEFT_CONTROL = 0x1D;
 
@@ -629,10 +648,20 @@ namespace WinJisUsSymbolOverlay
 
     internal static class KeyboardHook
     {
+        private struct ShortcutRemapState
+        {
+            public int ScanCode;
+            public bool Extended;
+            public ushort TargetVirtualKey;
+        }
+
         private static IntPtr hookHandle = IntPtr.Zero;
         private static NativeMethods.LowLevelKeyboardProc hookProc = HookCallback;
+        private static readonly IntPtr selfInjectedExtraInfo = new IntPtr(0x574A5553);
+        private static readonly object shortcutSyncRoot = new object();
         private static bool usMode;
         private static bool capsLockAsCtrl;
+        private static bool shortcutOverlay = true;
         private static SymbolWidthMode symbolWidthMode = SymbolWidthMode.Auto;
         private static FullwidthStyleMode fullwidthStyleMode = FullwidthStyleMode.Japanese;
         private static bool capsLockCtrlDown;
@@ -641,7 +670,20 @@ namespace WinJisUsSymbolOverlay
         private static bool capsLockPassThrough;
         private static bool physicalLeftCtrlDown;
         private static bool physicalRightCtrlDown;
+        private static bool physicalLeftAltDown;
+        private static bool physicalRightAltDown;
+        private static bool physicalLeftWinDown;
+        private static bool physicalRightWinDown;
+        private static bool physicalLeftShiftDown;
+        private static bool physicalRightShiftDown;
+        private static Func<ushort, bool, string, bool> shortcutKeySender = SendShortcutVirtualKey;
         private static readonly System.Collections.Generic.HashSet<int> suppressedScanCodes =
+            new System.Collections.Generic.HashSet<int>();
+        private static readonly System.Collections.Generic.Dictionary<int, ShortcutRemapState> activeShortcutRemaps =
+            new System.Collections.Generic.Dictionary<int, ShortcutRemapState>();
+        private static readonly System.Collections.Generic.HashSet<ushort> pendingShortcutKeyUps =
+            new System.Collections.Generic.HashSet<ushort>();
+        private static readonly System.Collections.Generic.HashSet<int> releasedShortcutRemapKeys =
             new System.Collections.Generic.HashSet<int>();
         private static readonly object autoDecisionCacheSyncRoot = new object();
         private static readonly TimeSpan autoDecisionCacheTtl = TimeSpan.FromMilliseconds(150);
@@ -649,6 +691,7 @@ namespace WinJisUsSymbolOverlay
         private static DateTime cachedAutoDecisionExpiresUtc = DateTime.MinValue;
         private static ImeProbeResult cachedAutoDecision;
         private static DateTime lastSendInputFailureUtc = DateTime.MinValue;
+        private static DateTime lastShortcutKeyUpFailureUtc = DateTime.MinValue;
         private static DateTime lastHookFailureUtc = DateTime.MinValue;
         private static DateTime lastCapsLockCtrlReleaseWarningUtc = DateTime.MinValue;
 
@@ -660,6 +703,11 @@ namespace WinJisUsSymbolOverlay
         public static bool CapsLockAsCtrl
         {
             get { return capsLockAsCtrl; }
+        }
+
+        public static bool ShortcutOverlay
+        {
+            get { return shortcutOverlay; }
         }
 
         public static SymbolWidthMode SymbolWidth
@@ -680,6 +728,11 @@ namespace WinJisUsSymbolOverlay
             }
 
             usMode = enabled;
+            if (!usMode)
+            {
+                ReleaseAllShortcutTargets("US overlay disabled", true);
+            }
+
             Logger.Write("US overlay " + (usMode ? "ON" : "OFF") + ". reason=" + reason);
         }
 
@@ -693,12 +746,52 @@ namespace WinJisUsSymbolOverlay
             capsLockAsCtrl = enabled;
             if (!capsLockAsCtrl)
             {
-                ReleaseCapsLockCtrl("disabled", true);
+                ReleaseCapsLockCtrl("disabled");
                 capsLockPhysicalDown = false;
                 capsLockPassThrough = false;
             }
 
             Logger.Write("CapsLock as Ctrl " + (capsLockAsCtrl ? "ON" : "OFF") + ". reason=" + reason);
+        }
+
+        public static void SetShortcutOverlayMode(string mode, string reason)
+        {
+            bool enabled;
+            if (!TryParseOnOffMode(mode, out enabled))
+            {
+                throw new ArgumentException("Unknown shortcut overlay mode: " + mode, "mode");
+            }
+
+            if (shortcutOverlay == enabled)
+            {
+                return;
+            }
+
+            shortcutOverlay = enabled;
+            if (!shortcutOverlay)
+            {
+                ReleaseAllShortcutTargets("shortcut overlay disabled", true);
+            }
+
+            Logger.Write("Shortcut overlay " + (shortcutOverlay ? "ON" : "OFF") + ". reason=" + reason);
+        }
+
+        private static bool TryParseOnOffMode(string mode, out bool enabled)
+        {
+            if (String.Equals(mode, "On", StringComparison.OrdinalIgnoreCase))
+            {
+                enabled = true;
+                return true;
+            }
+
+            if (String.Equals(mode, "Off", StringComparison.OrdinalIgnoreCase))
+            {
+                enabled = false;
+                return true;
+            }
+
+            enabled = true;
+            return false;
         }
 
         public static void SetSymbolWidthMode(string mode, string reason)
@@ -795,6 +888,8 @@ namespace WinJisUsSymbolOverlay
                 return;
             }
 
+            InitializeModifierState();
+
             IntPtr moduleHandle = NativeMethods.GetModuleHandle(null);
             hookHandle = NativeMethods.SetWindowsHookEx(
                 NativeMethods.WH_KEYBOARD_LL,
@@ -818,7 +913,8 @@ namespace WinJisUsSymbolOverlay
                 return;
             }
 
-            ReleaseCapsLockCtrl("hook uninstall", true);
+            ReleaseAllShortcutTargets("hook uninstall", true);
+            ReleaseCapsLockCtrl("hook uninstall");
 
             if (!NativeMethods.UnhookWindowsHookEx(hookHandle))
             {
@@ -840,6 +936,15 @@ namespace WinJisUsSymbolOverlay
             }
             catch (Exception ex)
             {
+                try
+                {
+                    ReleaseAllShortcutTargets("hook callback exception", true);
+                }
+                catch
+                {
+                    // Hook failure cleanup is best-effort.
+                }
+
                 DateTime now = DateTime.UtcNow;
                 if ((now - lastHookFailureUtc).TotalSeconds > 5)
                 {
@@ -873,6 +978,11 @@ namespace WinJisUsSymbolOverlay
                     typeof(NativeMethods.KBDLLHOOKSTRUCT)
                 );
 
+            if (IsSelfInjectedEvent(info))
+            {
+                return NativeMethods.CallNextHookEx(hookHandle, nCode, wParam, lParam);
+            }
+
             if ((info.flags & NativeMethods.LLKHF_INJECTED) != 0)
             {
                 return NativeMethods.CallNextHookEx(hookHandle, nCode, wParam, lParam);
@@ -882,11 +992,22 @@ namespace WinJisUsSymbolOverlay
             int vkCode = (int)info.vkCode;
             bool isExtended = (info.flags & NativeMethods.LLKHF_EXTENDED) != 0;
 
-            UpdatePhysicalCtrlState(vkCode, isExtended, isKeyDown, isKeyUp);
+            UpdateModifierState(vkCode, scanCode, isExtended, isKeyDown, isKeyUp);
             RetryPendingCapsLockCtrlRelease("hook event");
             EnsureCapsLockCtrlDownForHeldCaps("physical Ctrl released while CapsLock held");
+            RetryPendingShortcutKeyUps("hook event");
 
             if (HandleCapsLockAsCtrl(vkCode, isKeyDown, isKeyUp))
+            {
+                return new IntPtr(1);
+            }
+
+            bool shortcutSuppress;
+            bool canStartShortcutRemap =
+                usMode &&
+                shortcutOverlay &&
+                ShouldStartShortcutRemap(IsShortcutCtrlDown(), IsAltDown(), IsWinDown());
+            if (TryHandleShortcutOverlayEvent(scanCode, isExtended, isKeyDown, isKeyUp, canStartShortcutRemap, out shortcutSuppress))
             {
                 return new IntPtr(1);
             }
@@ -907,9 +1028,7 @@ namespace WinJisUsSymbolOverlay
                 return NativeMethods.CallNextHookEx(hookHandle, nCode, wParam, lParam);
             }
 
-            if (IsAnyModifierDown(NativeMethods.VK_LCONTROL, NativeMethods.VK_RCONTROL, NativeMethods.VK_CONTROL) ||
-                IsAnyModifierDown(NativeMethods.VK_LMENU, NativeMethods.VK_RMENU, NativeMethods.VK_MENU) ||
-                IsAnyModifierDown(NativeMethods.VK_LWIN, NativeMethods.VK_RWIN))
+            if (IsShortcutCtrlDown() || IsAltDown() || IsWinDown())
             {
                 return NativeMethods.CallNextHookEx(hookHandle, nCode, wParam, lParam);
             }
@@ -920,7 +1039,7 @@ namespace WinJisUsSymbolOverlay
             }
 
             char mapped;
-            bool shiftDown = IsAnyModifierDown(NativeMethods.VK_LSHIFT, NativeMethods.VK_RSHIFT, NativeMethods.VK_SHIFT);
+            bool shiftDown = IsShiftDown();
             if (!TryMapScanCode(scanCode, shiftDown, false, FullwidthStyleMode.Literal, out mapped))
             {
                 return NativeMethods.CallNextHookEx(hookHandle, nCode, wParam, lParam);
@@ -940,17 +1059,351 @@ namespace WinJisUsSymbolOverlay
             return NativeMethods.CallNextHookEx(hookHandle, nCode, wParam, lParam);
         }
 
-        private static bool IsAnyModifierDown(params int[] virtualKeys)
+        private static bool IsSelfInjectedEvent(NativeMethods.KBDLLHOOKSTRUCT info)
         {
-            for (int i = 0; i < virtualKeys.Length; i++)
+            return info.dwExtraInfo == selfInjectedExtraInfo;
+        }
+
+        private static void InitializeModifierState()
+        {
+            physicalLeftCtrlDown = IsVirtualKeyDown(NativeMethods.VK_LCONTROL);
+            physicalRightCtrlDown = IsVirtualKeyDown(NativeMethods.VK_RCONTROL);
+            physicalLeftAltDown = IsVirtualKeyDown(NativeMethods.VK_LMENU);
+            physicalRightAltDown = IsVirtualKeyDown(NativeMethods.VK_RMENU);
+            physicalLeftWinDown = IsVirtualKeyDown(NativeMethods.VK_LWIN);
+            physicalRightWinDown = IsVirtualKeyDown(NativeMethods.VK_RWIN);
+            physicalLeftShiftDown = IsVirtualKeyDown(NativeMethods.VK_LSHIFT);
+            physicalRightShiftDown = IsVirtualKeyDown(NativeMethods.VK_RSHIFT);
+        }
+
+        private static bool IsVirtualKeyDown(int virtualKey)
+        {
+            return (NativeMethods.GetAsyncKeyState(virtualKey) & unchecked((short)0x8000)) != 0;
+        }
+
+        private static void UpdateModifierState(int vkCode, int scanCode, bool isExtended, bool isKeyDown, bool isKeyUp)
+        {
+            if (!isKeyDown && !isKeyUp)
             {
-                if ((NativeMethods.GetAsyncKeyState(virtualKeys[i]) & unchecked((short)0x8000)) != 0)
+                return;
+            }
+
+            bool down = isKeyDown;
+            if (vkCode == NativeMethods.VK_LCONTROL ||
+                (vkCode == NativeMethods.VK_CONTROL && !isExtended))
+            {
+                physicalLeftCtrlDown = down;
+            }
+            else if (vkCode == NativeMethods.VK_RCONTROL ||
+                (vkCode == NativeMethods.VK_CONTROL && isExtended))
+            {
+                physicalRightCtrlDown = down;
+            }
+            else if (vkCode == NativeMethods.VK_LMENU ||
+                (vkCode == NativeMethods.VK_MENU && !isExtended))
+            {
+                physicalLeftAltDown = down;
+            }
+            else if (vkCode == NativeMethods.VK_RMENU ||
+                (vkCode == NativeMethods.VK_MENU && isExtended))
+            {
+                physicalRightAltDown = down;
+            }
+            else if (vkCode == NativeMethods.VK_LWIN)
+            {
+                physicalLeftWinDown = down;
+            }
+            else if (vkCode == NativeMethods.VK_RWIN)
+            {
+                physicalRightWinDown = down;
+            }
+            else if (vkCode == NativeMethods.VK_LSHIFT ||
+                (vkCode == NativeMethods.VK_SHIFT && scanCode == 0x2A))
+            {
+                physicalLeftShiftDown = down;
+            }
+            else if (vkCode == NativeMethods.VK_RSHIFT ||
+                (vkCode == NativeMethods.VK_SHIFT && scanCode == 0x36))
+            {
+                physicalRightShiftDown = down;
+            }
+        }
+
+        private static bool IsShortcutCtrlDown()
+        {
+            return physicalLeftCtrlDown || physicalRightCtrlDown || capsLockCtrlDown;
+        }
+
+        private static bool IsAltDown()
+        {
+            return physicalLeftAltDown || physicalRightAltDown;
+        }
+
+        private static bool IsWinDown()
+        {
+            return physicalLeftWinDown || physicalRightWinDown;
+        }
+
+        private static bool IsShiftDown()
+        {
+            return physicalLeftShiftDown || physicalRightShiftDown;
+        }
+
+        private static bool ShouldStartShortcutRemap(bool ctrlDown, bool altDown, bool winDown)
+        {
+            return ctrlDown && !altDown && !winDown;
+        }
+
+        private static bool TryHandleShortcutOverlayEvent(int scanCode, bool isExtended, bool isKeyDown, bool isKeyUp, bool canStartNewRemap, out bool suppress)
+        {
+            suppress = false;
+
+            int key = GetShortcutRemapKey(scanCode, isExtended);
+            bool releasedBeforeKeyUp;
+            lock (shortcutSyncRoot)
+            {
+                releasedBeforeKeyUp = releasedShortcutRemapKeys.Contains(key);
+                if (releasedBeforeKeyUp && isKeyUp)
                 {
-                    return true;
+                    releasedShortcutRemapKeys.Remove(key);
                 }
             }
 
-            return false;
+            if (releasedBeforeKeyUp)
+            {
+                suppress = true;
+                return true;
+            }
+
+            ShortcutRemapState active;
+            bool hasActive;
+            lock (shortcutSyncRoot)
+            {
+                hasActive = activeShortcutRemaps.TryGetValue(key, out active);
+            }
+
+            if (hasActive)
+            {
+                suppress = true;
+
+                if (isKeyUp)
+                {
+                    lock (shortcutSyncRoot)
+                    {
+                        activeShortcutRemaps.Remove(key);
+                    }
+
+                    if (!shortcutKeySender(active.TargetVirtualKey, true, "shortcut key up"))
+                    {
+                        AddPendingShortcutKeyUp(active.TargetVirtualKey);
+                        LogShortcutKeyUpFailure(active.TargetVirtualKey, "shortcut key up");
+                    }
+
+                    return true;
+                }
+
+                if (isKeyDown)
+                {
+                    if (!shortcutKeySender(active.TargetVirtualKey, false, "shortcut repeat key down"))
+                    {
+                        LogShortcutKeyDownFailure(active.TargetVirtualKey, "shortcut repeat key down");
+                    }
+
+                    return true;
+                }
+
+                return true;
+            }
+
+            if (!isKeyDown || !canStartNewRemap || isExtended)
+            {
+                return false;
+            }
+
+            ushort targetVirtualKey;
+            if (!TryMapShortcutScanCode(scanCode, out targetVirtualKey))
+            {
+                return false;
+            }
+
+            if (!shortcutKeySender(targetVirtualKey, false, "shortcut key down"))
+            {
+                LogShortcutKeyDownFailure(targetVirtualKey, "shortcut key down");
+                return false;
+            }
+
+            ShortcutRemapState state = new ShortcutRemapState();
+            state.ScanCode = scanCode;
+            state.Extended = isExtended;
+            state.TargetVirtualKey = targetVirtualKey;
+
+            lock (shortcutSyncRoot)
+            {
+                activeShortcutRemaps[key] = state;
+            }
+
+            suppress = true;
+            return true;
+        }
+
+        private static int GetShortcutRemapKey(int scanCode, bool isExtended)
+        {
+            return (isExtended ? 0x10000 : 0) | (scanCode & 0xFFFF);
+        }
+
+        private static bool TryMapShortcutScanCode(int scanCode, out ushort targetVirtualKey)
+        {
+            switch (scanCode)
+            {
+                case 0x0C:
+                    targetVirtualKey = NativeMethods.VK_OEM_MINUS;
+                    return true;
+                case 0x0D:
+                    targetVirtualKey = NativeMethods.VK_OEM_PLUS;
+                    return true;
+                case 0x1A:
+                    targetVirtualKey = NativeMethods.VK_OEM_4;
+                    return true;
+                case 0x1B:
+                    targetVirtualKey = NativeMethods.VK_OEM_6;
+                    return true;
+                case 0x2B:
+                    targetVirtualKey = NativeMethods.VK_OEM_5;
+                    return true;
+                case 0x27:
+                    targetVirtualKey = NativeMethods.VK_OEM_1;
+                    return true;
+                case 0x28:
+                    targetVirtualKey = NativeMethods.VK_OEM_7;
+                    return true;
+                case 0x29:
+                    targetVirtualKey = NativeMethods.VK_OEM_3;
+                    return true;
+                case 0x35:
+                    targetVirtualKey = NativeMethods.VK_OEM_2;
+                    return true;
+                default:
+                    targetVirtualKey = 0;
+                    return false;
+            }
+        }
+
+        private static void AddPendingShortcutKeyUp(ushort targetVirtualKey)
+        {
+            lock (shortcutSyncRoot)
+            {
+                pendingShortcutKeyUps.Add(targetVirtualKey);
+            }
+        }
+
+        public static void RetryPendingShortcutKeyUps(string reason)
+        {
+            ushort[] pending;
+            lock (shortcutSyncRoot)
+            {
+                if (pendingShortcutKeyUps.Count == 0)
+                {
+                    return;
+                }
+
+                pending = new ushort[pendingShortcutKeyUps.Count];
+                pendingShortcutKeyUps.CopyTo(pending);
+            }
+
+            for (int i = 0; i < pending.Length; i++)
+            {
+                ushort targetVirtualKey = pending[i];
+                if (shortcutKeySender(targetVirtualKey, true, reason + " pending shortcut key up"))
+                {
+                    lock (shortcutSyncRoot)
+                    {
+                        pendingShortcutKeyUps.Remove(targetVirtualKey);
+                    }
+                }
+                else
+                {
+                    LogShortcutKeyUpFailure(targetVirtualKey, reason + " pending shortcut key up");
+                }
+            }
+        }
+
+        private static void ReleaseAllShortcutTargets(string reason, bool keepPendingFailures)
+        {
+            System.Collections.Generic.HashSet<ushort> targetKeys = new System.Collections.Generic.HashSet<ushort>();
+            lock (shortcutSyncRoot)
+            {
+                foreach (int activeKey in activeShortcutRemaps.Keys)
+                {
+                    releasedShortcutRemapKeys.Add(activeKey);
+                }
+
+                foreach (ShortcutRemapState state in activeShortcutRemaps.Values)
+                {
+                    targetKeys.Add(state.TargetVirtualKey);
+                }
+
+                activeShortcutRemaps.Clear();
+
+                foreach (ushort targetVirtualKey in pendingShortcutKeyUps)
+                {
+                    targetKeys.Add(targetVirtualKey);
+                }
+
+                pendingShortcutKeyUps.Clear();
+            }
+
+            foreach (ushort targetVirtualKey in targetKeys)
+            {
+                if (!shortcutKeySender(targetVirtualKey, true, reason + " shortcut key cleanup"))
+                {
+                    if (keepPendingFailures)
+                    {
+                        AddPendingShortcutKeyUp(targetVirtualKey);
+                    }
+
+                    LogShortcutKeyUpFailure(targetVirtualKey, reason + " shortcut key cleanup");
+                }
+            }
+        }
+
+        private static int GetActiveShortcutRemapCountForSelfTest()
+        {
+            lock (shortcutSyncRoot)
+            {
+                return activeShortcutRemaps.Count;
+            }
+        }
+
+        private static int GetPendingShortcutKeyUpCountForSelfTest()
+        {
+            lock (shortcutSyncRoot)
+            {
+                return pendingShortcutKeyUps.Count;
+            }
+        }
+
+        private static void ResetShortcutStateForSelfTest()
+        {
+            lock (shortcutSyncRoot)
+            {
+                activeShortcutRemaps.Clear();
+                pendingShortcutKeyUps.Clear();
+                releasedShortcutRemapKeys.Clear();
+            }
+
+            suppressedScanCodes.Clear();
+            capsLockCtrlDown = false;
+            capsLockCtrlReleasePending = false;
+            capsLockPhysicalDown = false;
+            capsLockPassThrough = false;
+            physicalLeftCtrlDown = false;
+            physicalRightCtrlDown = false;
+            physicalLeftAltDown = false;
+            physicalRightAltDown = false;
+            physicalLeftWinDown = false;
+            physicalRightWinDown = false;
+            physicalLeftShiftDown = false;
+            physicalRightShiftDown = false;
         }
 
         private static bool ShouldUseFullWidthSymbols()
@@ -1278,7 +1731,7 @@ namespace WinJisUsSymbolOverlay
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("IME diagnostics begin. No input text, window titles, URLs, clipboard, command lines, or full paths are logged.");
             sb.AppendLine("environment os=" + SafeLogValue(Environment.OSVersion.VersionString) + " process64=" + Environment.Is64BitProcess.ToString() + " os64=" + Environment.Is64BitOperatingSystem.ToString());
-            sb.AppendLine("state usOverlay=" + usMode.ToString() + " capsLockAsCtrl=" + capsLockAsCtrl.ToString() + " symbolWidth=" + GetSymbolWidthModeLabel(symbolWidthMode) + " fullwidthStyle=" + fullwidthStyleMode.ToString());
+            sb.AppendLine("state usOverlay=" + usMode.ToString() + " capsLockAsCtrl=" + capsLockAsCtrl.ToString() + " shortcutOverlay=" + shortcutOverlay.ToString() + " symbolWidth=" + GetSymbolWidthModeLabel(symbolWidthMode) + " fullwidthStyle=" + fullwidthStyleMode.ToString());
 
             IntPtr foreground = NativeMethods.GetForegroundWindow();
             uint foregroundPid;
@@ -1499,7 +1952,7 @@ namespace WinJisUsSymbolOverlay
                     return false;
                 }
 
-                ReleaseCapsLockCtrl("CapsLock key up", false);
+                ReleaseCapsLockCtrl("CapsLock key up");
                 return true;
             }
 
@@ -1510,7 +1963,7 @@ namespace WinJisUsSymbolOverlay
         {
             if (capsLockCtrlReleasePending)
             {
-                ReleaseCapsLockCtrl(reason, false);
+                ReleaseCapsLockCtrl(reason);
             }
         }
 
@@ -1533,7 +1986,7 @@ namespace WinJisUsSymbolOverlay
             }
         }
 
-        private static bool ReleaseCapsLockCtrl(string reason, bool force)
+        private static bool ReleaseCapsLockCtrl(string reason)
         {
             if (!capsLockCtrlDown)
             {
@@ -1541,11 +1994,11 @@ namespace WinJisUsSymbolOverlay
                 return true;
             }
 
-            if (!force && IsPhysicalCtrlDown())
+            if (physicalLeftCtrlDown)
             {
-                capsLockCtrlReleasePending = true;
-                LogCapsLockCtrlReleasePending(reason + "; waiting for physical Ctrl release");
-                return false;
+                capsLockCtrlDown = false;
+                capsLockCtrlReleasePending = false;
+                return true;
             }
 
             if (SendKeyboardScanCode(NativeMethods.SC_LEFT_CONTROL, false, true, reason))
@@ -1558,25 +2011,6 @@ namespace WinJisUsSymbolOverlay
             capsLockCtrlReleasePending = true;
             LogCapsLockCtrlReleasePending(reason + "; SendInput key-up failed");
             return false;
-        }
-
-        private static void UpdatePhysicalCtrlState(int vkCode, bool isExtended, bool isKeyDown, bool isKeyUp)
-        {
-            if (!isKeyDown && !isKeyUp)
-            {
-                return;
-            }
-
-            if (vkCode == NativeMethods.VK_LCONTROL ||
-                (vkCode == NativeMethods.VK_CONTROL && !isExtended))
-            {
-                physicalLeftCtrlDown = isKeyDown;
-            }
-            else if (vkCode == NativeMethods.VK_RCONTROL ||
-                (vkCode == NativeMethods.VK_CONTROL && isExtended))
-            {
-                physicalRightCtrlDown = isKeyDown;
-            }
         }
 
         private static bool IsPhysicalCtrlDown()
@@ -1594,6 +2028,56 @@ namespace WinJisUsSymbolOverlay
 
             lastCapsLockCtrlReleaseWarningUtc = now;
             Logger.Write("CapsLock as Ctrl release pending. reason=" + reason);
+        }
+
+        private static void LogShortcutKeyDownFailure(ushort targetVirtualKey, string reason)
+        {
+            DateTime now = DateTime.UtcNow;
+            if ((now - lastSendInputFailureUtc).TotalSeconds <= 5)
+            {
+                return;
+            }
+
+            lastSendInputFailureUtc = now;
+            Logger.Write("SendInput shortcut key-down failed. reason=" + reason + " vk=0x" + targetVirtualKey.ToString("X2"));
+        }
+
+        private static void LogShortcutKeyUpFailure(ushort targetVirtualKey, string reason)
+        {
+            DateTime now = DateTime.UtcNow;
+            if ((now - lastShortcutKeyUpFailureUtc).TotalSeconds <= 5)
+            {
+                return;
+            }
+
+            lastShortcutKeyUpFailureUtc = now;
+            Logger.Write("SendInput shortcut key-up pending. reason=" + reason + " vk=0x" + targetVirtualKey.ToString("X2"));
+        }
+
+        private static bool SendShortcutVirtualKey(ushort virtualKey, bool keyUp, string reason)
+        {
+            NativeMethods.INPUT[] inputs = new NativeMethods.INPUT[1];
+            inputs[0].type = NativeMethods.INPUT_KEYBOARD;
+            inputs[0].U.ki.wVk = virtualKey;
+            inputs[0].U.ki.wScan = 0;
+            inputs[0].U.ki.dwFlags = keyUp ? (uint)NativeMethods.KEYEVENTF_KEYUP : 0;
+            inputs[0].U.ki.time = 0;
+            inputs[0].U.ki.dwExtraInfo = selfInjectedExtraInfo;
+
+            uint sent = NativeMethods.SendInput(1, inputs, Marshal.SizeOf(typeof(NativeMethods.INPUT)));
+            if (sent == 1)
+            {
+                return true;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            if ((now - lastSendInputFailureUtc).TotalSeconds > 5)
+            {
+                lastSendInputFailureUtc = now;
+                Logger.Write("SendInput virtual key failed. reason=" + reason + " vk=0x" + virtualKey.ToString("X2") + " keyUp=" + keyUp.ToString() + " sent=" + sent.ToString() + " error=" + Marshal.GetLastWin32Error().ToString());
+            }
+
+            return false;
         }
 
         private static bool SendKeyboardScanCode(ushort scanCode, bool extended, bool keyUp, string reason)
@@ -1614,7 +2098,7 @@ namespace WinJisUsSymbolOverlay
             }
 
             inputs[0].U.ki.time = 0;
-            inputs[0].U.ki.dwExtraInfo = IntPtr.Zero;
+            inputs[0].U.ki.dwExtraInfo = selfInjectedExtraInfo;
 
             uint sent = NativeMethods.SendInput(1, inputs, Marshal.SizeOf(typeof(NativeMethods.INPUT)));
             if (sent == 1)
@@ -1739,14 +2223,14 @@ namespace WinJisUsSymbolOverlay
             inputs[0].U.ki.wScan = value;
             inputs[0].U.ki.dwFlags = NativeMethods.KEYEVENTF_UNICODE;
             inputs[0].U.ki.time = 0;
-            inputs[0].U.ki.dwExtraInfo = IntPtr.Zero;
+            inputs[0].U.ki.dwExtraInfo = selfInjectedExtraInfo;
 
             inputs[1].type = NativeMethods.INPUT_KEYBOARD;
             inputs[1].U.ki.wVk = 0;
             inputs[1].U.ki.wScan = value;
             inputs[1].U.ki.dwFlags = NativeMethods.KEYEVENTF_UNICODE | NativeMethods.KEYEVENTF_KEYUP;
             inputs[1].U.ki.time = 0;
-            inputs[1].U.ki.dwExtraInfo = IntPtr.Zero;
+            inputs[1].U.ki.dwExtraInfo = selfInjectedExtraInfo;
 
             uint sent = NativeMethods.SendInput(2, inputs, Marshal.SizeOf(typeof(NativeMethods.INPUT)));
             if (sent == 2)
@@ -1762,7 +2246,7 @@ namespace WinJisUsSymbolOverlay
                 keyUpOnly[0].U.ki.wScan = value;
                 keyUpOnly[0].U.ki.dwFlags = NativeMethods.KEYEVENTF_UNICODE | NativeMethods.KEYEVENTF_KEYUP;
                 keyUpOnly[0].U.ki.time = 0;
-                keyUpOnly[0].U.ki.dwExtraInfo = IntPtr.Zero;
+                keyUpOnly[0].U.ki.dwExtraInfo = selfInjectedExtraInfo;
                 uint cleanupSent = NativeMethods.SendInput(1, keyUpOnly, Marshal.SizeOf(typeof(NativeMethods.INPUT)));
                 if (cleanupSent == 1)
                 {
@@ -1804,6 +2288,19 @@ namespace WinJisUsSymbolOverlay
             AssertFullWidthConversionMode(NativeMethods.IME_CMODE_NATIVE | NativeMethods.IME_CMODE_KATAKANA, false);
             AssertFullWidthConversionMode(NativeMethods.IME_CMODE_FULLSHAPE | NativeMethods.IME_CMODE_NATIVE | NativeMethods.IME_CMODE_KATAKANA, true);
             AssertFullWidthConversionMode(0, false);
+
+            AssertShortcutMap(0x0C, NativeMethods.VK_OEM_MINUS);
+            AssertShortcutMap(0x0D, NativeMethods.VK_OEM_PLUS);
+            AssertShortcutMap(0x1A, NativeMethods.VK_OEM_4);
+            AssertShortcutMap(0x1B, NativeMethods.VK_OEM_6);
+            AssertShortcutMap(0x2B, NativeMethods.VK_OEM_5);
+            AssertShortcutMap(0x27, NativeMethods.VK_OEM_1);
+            AssertShortcutMap(0x28, NativeMethods.VK_OEM_7);
+            AssertShortcutMap(0x29, NativeMethods.VK_OEM_3);
+            AssertShortcutMap(0x35, NativeMethods.VK_OEM_2);
+            AssertNoShortcutMap(0x03);
+            AssertShortcutStartPolicy();
+            AssertShortcutStateTransitions();
 
             AssertMap(0x03, true, false, '@');
             AssertMap(0x03, true, true, '\uFF20');
@@ -1863,6 +2360,184 @@ namespace WinJisUsSymbolOverlay
             AssertMapStyle(0x35, true, true, FullwidthStyleMode.Japanese, '\uFF1F');
         }
 
+        private static void AssertShortcutStartPolicy()
+        {
+            AssertShortcutStart(true, false, false, true);
+            AssertShortcutStart(false, false, false, false);
+            AssertShortcutStart(true, true, false, false);
+            AssertShortcutStart(true, false, true, false);
+        }
+
+        private static void AssertShortcutStart(bool ctrlDown, bool altDown, bool winDown, bool expected)
+        {
+            bool actual = ShouldStartShortcutRemap(ctrlDown, altDown, winDown);
+            if (actual != expected)
+            {
+                throw new InvalidOperationException("Shortcut start policy test failed. ctrl=" + ctrlDown.ToString() + " alt=" + altDown.ToString() + " win=" + winDown.ToString() + " expected=" + expected.ToString());
+            }
+        }
+
+        private static void AssertShortcutStateTransitions()
+        {
+            Func<ushort, bool, string, bool> originalSender = shortcutKeySender;
+            List<string> sends = new List<string>();
+
+            try
+            {
+                shortcutKeySender = delegate(ushort virtualKey, bool keyUp, string reason)
+                {
+                    sends.Add(virtualKey.ToString("X2") + ":" + (keyUp ? "up" : "down"));
+                    return true;
+                };
+
+                bool suppress;
+                ResetShortcutStateForSelfTest();
+                if (!TryHandleShortcutOverlayEvent(0x0D, false, true, false, true, out suppress) || !suppress)
+                {
+                    throw new InvalidOperationException("Shortcut state test failed: keydown was not suppressed.");
+                }
+
+                physicalLeftCtrlDown = false;
+                if (!TryHandleShortcutOverlayEvent(0x0D, false, false, true, false, out suppress) || !suppress)
+                {
+                    throw new InvalidOperationException("Shortcut state test failed: keyup after Ctrl release was not suppressed.");
+                }
+
+                AssertShortcutSendSequence(sends, "BB:down", "BB:up");
+                AssertShortcutCounts(0, 0);
+
+                sends.Clear();
+                ResetShortcutStateForSelfTest();
+                TryHandleShortcutOverlayEvent(0x0D, false, true, false, true, out suppress);
+                TryHandleShortcutOverlayEvent(0x0D, false, true, false, true, out suppress);
+                TryHandleShortcutOverlayEvent(0x0D, false, false, true, false, out suppress);
+                AssertShortcutSendSequence(sends, "BB:down", "BB:down", "BB:up");
+                AssertShortcutCounts(0, 0);
+
+                ResetShortcutStateForSelfTest();
+                physicalLeftCtrlDown = true;
+                capsLockCtrlDown = true;
+                if (!IsShortcutCtrlDown())
+                {
+                    throw new InvalidOperationException("Shortcut state test failed: physical Ctrl plus CapsLock-as-Ctrl was not treated as Ctrl.");
+                }
+
+                capsLockCtrlDown = false;
+                if (!IsShortcutCtrlDown())
+                {
+                    throw new InvalidOperationException("Shortcut state test failed: physical Ctrl was cleared by synthetic Ctrl release.");
+                }
+
+                physicalLeftCtrlDown = false;
+                if (IsShortcutCtrlDown())
+                {
+                    throw new InvalidOperationException("Shortcut state test failed: Ctrl remained active after all sources released.");
+                }
+
+                ResetShortcutStateForSelfTest();
+                capsLockCtrlDown = true;
+                physicalLeftCtrlDown = true;
+                if (!ReleaseCapsLockCtrl("self-test physical left Ctrl held") || capsLockCtrlDown)
+                {
+                    throw new InvalidOperationException("Shortcut state test failed: CapsLock-as-Ctrl release disturbed held physical left Ctrl.");
+                }
+
+                sends.Clear();
+                ResetShortcutStateForSelfTest();
+                TryHandleShortcutOverlayEvent(0x0D, false, true, false, true, out suppress);
+                ReleaseAllShortcutTargets("self-test overlay off", true);
+                if (!TryHandleShortcutOverlayEvent(0x0D, false, true, false, false, out suppress) || !suppress)
+                {
+                    throw new InvalidOperationException("Shortcut state test failed: cleaned-up repeat keydown was not suppressed.");
+                }
+
+                if (!TryHandleShortcutOverlayEvent(0x0D, false, false, true, false, out suppress) || !suppress)
+                {
+                    throw new InvalidOperationException("Shortcut state test failed: cleaned-up physical keyup was not suppressed.");
+                }
+
+                AssertShortcutSendSequence(sends, "BB:down", "BB:up");
+                AssertShortcutCounts(0, 0);
+
+                ResetShortcutStateForSelfTest();
+                shortcutKeySender = delegate(ushort virtualKey, bool keyUp, string reason)
+                {
+                    sends.Add(virtualKey.ToString("X2") + ":" + (keyUp ? "up" : "down"));
+                    return false;
+                };
+
+                sends.Clear();
+                if (TryHandleShortcutOverlayEvent(0x0D, false, true, false, true, out suppress) || suppress)
+                {
+                    throw new InvalidOperationException("Shortcut state test failed: failed keydown was suppressed.");
+                }
+
+                AssertShortcutCounts(0, 0);
+
+                ResetShortcutStateForSelfTest();
+                shortcutKeySender = delegate(ushort virtualKey, bool keyUp, string reason)
+                {
+                    sends.Add(virtualKey.ToString("X2") + ":" + (keyUp ? "up" : "down"));
+                    return !keyUp;
+                };
+
+                sends.Clear();
+                TryHandleShortcutOverlayEvent(0x0D, false, true, false, true, out suppress);
+                if (!TryHandleShortcutOverlayEvent(0x0D, false, false, true, false, out suppress) || !suppress)
+                {
+                    throw new InvalidOperationException("Shortcut state test failed: failed keyup did not suppress original event.");
+                }
+
+                AssertShortcutCounts(0, 1);
+
+                shortcutKeySender = delegate(ushort virtualKey, bool keyUp, string reason)
+                {
+                    sends.Add(virtualKey.ToString("X2") + ":" + (keyUp ? "retry-up" : "down"));
+                    return true;
+                };
+                RetryPendingShortcutKeyUps("self-test retry");
+                AssertShortcutCounts(0, 0);
+
+                NativeMethods.KBDLLHOOKSTRUCT info = new NativeMethods.KBDLLHOOKSTRUCT();
+                info.dwExtraInfo = selfInjectedExtraInfo;
+                if (!IsSelfInjectedEvent(info))
+                {
+                    throw new InvalidOperationException("Shortcut state test failed: self-injected marker was not recognized.");
+                }
+            }
+            finally
+            {
+                shortcutKeySender = originalSender;
+                ResetShortcutStateForSelfTest();
+            }
+        }
+
+        private static void AssertShortcutSendSequence(List<string> actual, params string[] expected)
+        {
+            if (actual.Count != expected.Length)
+            {
+                throw new InvalidOperationException("Shortcut send sequence length mismatch. expected=" + expected.Length.ToString() + " actual=" + actual.Count.ToString());
+            }
+
+            for (int i = 0; i < expected.Length; i++)
+            {
+                if (!String.Equals(actual[i], expected[i], StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("Shortcut send sequence mismatch at " + i.ToString() + ". expected=" + expected[i] + " actual=" + actual[i]);
+                }
+            }
+        }
+
+        private static void AssertShortcutCounts(int expectedActive, int expectedPending)
+        {
+            int active = GetActiveShortcutRemapCountForSelfTest();
+            int pending = GetPendingShortcutKeyUpCountForSelfTest();
+            if (active != expectedActive || pending != expectedPending)
+            {
+                throw new InvalidOperationException("Shortcut state count mismatch. expectedActive=" + expectedActive.ToString() + " active=" + active.ToString() + " expectedPending=" + expectedPending.ToString() + " pending=" + pending.ToString());
+            }
+        }
+
         private static void AssertMap(int scanCode, bool shift, bool fullWidth, char expected)
         {
             AssertMapStyle(scanCode, shift, fullWidth, FullwidthStyleMode.Literal, expected);
@@ -1883,6 +2558,24 @@ namespace WinJisUsSymbolOverlay
             if (TryMapScanCode(scanCode, shift, fullWidth, FullwidthStyleMode.Literal, out actual))
             {
                 throw new InvalidOperationException("Unexpected mapping for scanCode=" + scanCode.ToString("X2") + " shift=" + shift.ToString() + " fullWidth=" + fullWidth.ToString());
+            }
+        }
+
+        private static void AssertShortcutMap(int scanCode, int expectedVirtualKey)
+        {
+            ushort actual;
+            if (!TryMapShortcutScanCode(scanCode, out actual) || actual != expectedVirtualKey)
+            {
+                throw new InvalidOperationException("Shortcut mapping test failed for scanCode=" + scanCode.ToString("X2") + " expectedVk=0x" + expectedVirtualKey.ToString("X2"));
+            }
+        }
+
+        private static void AssertNoShortcutMap(int scanCode)
+        {
+            ushort actual;
+            if (TryMapShortcutScanCode(scanCode, out actual))
+            {
+                throw new InvalidOperationException("Unexpected shortcut mapping for scanCode=" + scanCode.ToString("X2"));
             }
         }
 
@@ -1968,6 +2661,7 @@ namespace WinJisUsSymbolOverlay
         private readonly ToolStripMenuItem onItem;
         private readonly ToolStripMenuItem offItem;
         private readonly ToolStripMenuItem capsCtrlItem;
+        private readonly ToolStripMenuItem shortcutOverlayItem;
         private readonly ToolStripMenuItem symbolWidthAutoItem;
         private readonly ToolStripMenuItem symbolWidthAsciiItem;
         private readonly ToolStripMenuItem symbolWidthFullwidthItem;
@@ -1979,20 +2673,25 @@ namespace WinJisUsSymbolOverlay
         private readonly Icon customIcon;
         private bool disposed;
 
-        public TrayContext(string startMode, bool capsLockAsCtrl, string symbolWidth, string fullwidthStyle, string logPath, string iconPath)
+        public TrayContext(string startMode, bool capsLockAsCtrl, string symbolWidth, string fullwidthStyle, string shortcutOverlay, string logPath, string iconPath)
         {
             Logger.Configure(logPath);
-            Logger.Write("win-jis-us-symbol-overlay daemon starting. startMode=" + startMode + " capsLockAsCtrl=" + capsLockAsCtrl.ToString() + " symbolWidth=" + symbolWidth + " fullwidthStyle=" + fullwidthStyle);
+            Logger.Write("win-jis-us-symbol-overlay daemon starting. startMode=" + startMode + " capsLockAsCtrl=" + capsLockAsCtrl.ToString() + " symbolWidth=" + symbolWidth + " fullwidthStyle=" + fullwidthStyle + " shortcutOverlay=" + shortcutOverlay);
 
             KeyboardHook.SetUsMode(String.Equals(startMode, "US", StringComparison.OrdinalIgnoreCase), "startup");
             KeyboardHook.SetCapsLockAsCtrl(capsLockAsCtrl, "startup");
             KeyboardHook.SetSymbolWidthMode(symbolWidth, "startup");
             KeyboardHook.SetFullwidthStyleMode(fullwidthStyle, "startup");
+            KeyboardHook.SetShortcutOverlayMode(shortcutOverlay, "startup");
             KeyboardHook.Install();
 
             capsCtrlReleaseRetryTimer = new System.Windows.Forms.Timer();
             capsCtrlReleaseRetryTimer.Interval = 500;
-            capsCtrlReleaseRetryTimer.Tick += delegate { KeyboardHook.RetryPendingCapsLockCtrlRelease("timer"); };
+            capsCtrlReleaseRetryTimer.Tick += delegate
+            {
+                KeyboardHook.RetryPendingCapsLockCtrlRelease("timer");
+                KeyboardHook.RetryPendingShortcutKeyUps("timer");
+            };
             capsCtrlReleaseRetryTimer.Start();
 
             imeDiagnosticsTimer = new System.Windows.Forms.Timer();
@@ -2013,6 +2712,7 @@ namespace WinJisUsSymbolOverlay
             onItem = new ToolStripMenuItem("US overlay ON");
             offItem = new ToolStripMenuItem("US overlay OFF");
             capsCtrlItem = new ToolStripMenuItem("CapsLock as Ctrl");
+            shortcutOverlayItem = new ToolStripMenuItem("Shortcut overlay");
             symbolWidthAutoItem = new ToolStripMenuItem("Symbol width Auto");
             symbolWidthAsciiItem = new ToolStripMenuItem("Symbol width ASCII");
             symbolWidthFullwidthItem = new ToolStripMenuItem("Symbol width Fullwidth");
@@ -2026,6 +2726,7 @@ namespace WinJisUsSymbolOverlay
             onItem.Click += delegate { SetMode(true, "menu"); };
             offItem.Click += delegate { SetMode(false, "menu"); };
             capsCtrlItem.Click += delegate { SetCapsLockAsCtrl(!KeyboardHook.CapsLockAsCtrl, "menu"); };
+            shortcutOverlayItem.Click += delegate { SetShortcutOverlay(!KeyboardHook.ShortcutOverlay, "menu"); };
             symbolWidthAutoItem.Click += delegate { SetSymbolWidthMode("Auto", "menu"); };
             symbolWidthAsciiItem.Click += delegate { SetSymbolWidthMode("ASCII", "menu"); };
             symbolWidthFullwidthItem.Click += delegate { SetSymbolWidthMode("Fullwidth", "menu"); };
@@ -2040,10 +2741,12 @@ namespace WinJisUsSymbolOverlay
             menu.Items.Add(offItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(capsCtrlItem);
+            menu.Items.Add(shortcutOverlayItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(symbolWidthAutoItem);
             menu.Items.Add(symbolWidthAsciiItem);
             menu.Items.Add(symbolWidthFullwidthItem);
+            menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(fullwidthStyleJapaneseItem);
             menu.Items.Add(fullwidthStyleLiteralItem);
             menu.Items.Add(new ToolStripSeparator());
@@ -2118,6 +2821,18 @@ namespace WinJisUsSymbolOverlay
             );
         }
 
+        private void SetShortcutOverlay(bool enabled, string reason)
+        {
+            KeyboardHook.SetShortcutOverlayMode(enabled ? "On" : "Off", reason);
+            UpdateTray();
+            notifyIcon.ShowBalloonTip(
+                1200,
+                "win-jis-us-symbol-overlay",
+                enabled ? "Shortcut overlay ON" : "Shortcut overlay OFF",
+                ToolTipIcon.Info
+            );
+        }
+
         private void SetSymbolWidthMode(string mode, string reason)
         {
             KeyboardHook.SetSymbolWidthMode(mode, reason);
@@ -2148,6 +2863,7 @@ namespace WinJisUsSymbolOverlay
             onItem.Checked = enabled;
             offItem.Checked = !enabled;
             capsCtrlItem.Checked = KeyboardHook.CapsLockAsCtrl;
+            shortcutOverlayItem.Checked = KeyboardHook.ShortcutOverlay;
             symbolWidthAutoItem.Checked = KeyboardHook.SymbolWidth == SymbolWidthMode.Auto;
             symbolWidthAsciiItem.Checked = KeyboardHook.SymbolWidth == SymbolWidthMode.Ascii;
             symbolWidthFullwidthItem.Checked = KeyboardHook.SymbolWidth == SymbolWidthMode.Fullwidth;
@@ -2291,11 +3007,11 @@ namespace WinJisUsSymbolOverlay
 
     public static class KeyboardOverlayApp
     {
-        public static void Run(string startMode, bool capsLockAsCtrl, string symbolWidth, string fullwidthStyle, string logPath, string iconPath)
+        public static void Run(string startMode, bool capsLockAsCtrl, string symbolWidth, string fullwidthStyle, string shortcutOverlay, string logPath, string iconPath)
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new TrayContext(startMode, capsLockAsCtrl, symbolWidth, fullwidthStyle, logPath, iconPath));
+            Application.Run(new TrayContext(startMode, capsLockAsCtrl, symbolWidth, fullwidthStyle, shortcutOverlay, logPath, iconPath));
         }
 
         public static void SelfTest(string logPath)
@@ -2360,7 +3076,7 @@ if (-not $createdMutex) {
 
 try {
     $iconPath = Get-IconPathForScript -ScriptPath (Get-ThisScriptPath)
-    [WinJisUsSymbolOverlay.KeyboardOverlayApp]::Run($StartMode, [bool]$CapsLockAsCtrl, $SymbolWidth, $FullwidthStyle, $LogPath, $iconPath)
+    [WinJisUsSymbolOverlay.KeyboardOverlayApp]::Run($StartMode, [bool]$CapsLockAsCtrl, $SymbolWidth, $FullwidthStyle, $ShortcutOverlay, $LogPath, $iconPath)
 }
 catch {
     Write-StartupLog "Fatal startup/runtime error: $($_.Exception.GetType().FullName): $($_.Exception.Message)"

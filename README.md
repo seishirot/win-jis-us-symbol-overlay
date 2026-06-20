@@ -9,6 +9,12 @@ enabled, it intercepts a fixed set of symbol-key positions and sends the
 corresponding US-layout symbol as either ASCII or a fullwidth equivalent,
 depending on the current Symbol Width mode.
 
+For shortcut chords, it also has a narrow Ctrl shortcut overlay. While US
+overlay is ON, `Ctrl` plus fixed US OEM symbol-key positions can be sent as the
+matching Windows `VK_OEM_*` key events so app shortcuts such as editor zoom or
+split commands can work from a US physical keyboard. Letter shortcuts and
+`Alt`/`Win` chords are left alone.
+
 ## Files
 
 - `win-jis-us-symbol-overlay.ps1`: PowerShell entrypoint and tray daemon.
@@ -45,8 +51,9 @@ Then start the daemon with the generated shortcut:
 ```
 
 The generated shortcut starts hidden with US overlay and CapsLock-as-Ctrl
-enabled, uses symbol width `Auto`, and uses the custom icon. The `.vbs`
-launcher starts the same way, but keeps the default Windows Script Host icon:
+enabled, uses symbol width `Auto`, keeps shortcut overlay ON, and uses the
+custom icon. The `.vbs` launcher starts the same way, but keeps the default
+Windows Script Host icon:
 
 ```powershell
 .\start-win-jis-us-symbol-overlay.vbs
@@ -106,12 +113,16 @@ To force the previous literal fullwidth style:
 powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-overlay.ps1" -StartMode US -SymbolWidth Fullwidth -FullwidthStyle Literal
 ```
 
+Shortcut overlay defaults to `On`. Use tray menu `Shortcut overlay` or pass
+`-ShortcutOverlay Off` if a target app needs the original JIS-layout shortcut
+events.
+
 ## What Gets Remapped
 
 Only these symbol positions are remapped. The table shows the ASCII base output
 and the default Japanese fullwidth output. `-FullwidthStyle Literal` changes
 `「`, `」`, and `・` back to `［`, `］`, and `／`. Letters, IME behavior,
-shortcuts, and all other keys are intentionally left alone.
+and all other keys are intentionally left alone.
 
 ```text
 Physical key        ASCII output   Japanese fullwidth output
@@ -132,6 +143,26 @@ Shift+0             )              ）
 / / Shift+/         / / ?          ・ / ？
 ```
 
+While `Ctrl` is held and shortcut overlay is ON, only these unextended US OEM
+symbol-key positions are converted to virtual-key events. This is separate from
+text input and does not use Unicode character injection:
+
+```text
+Physical key        Shortcut virtual key
+- / Shift+-         VK_OEM_MINUS
+= / Shift+=         VK_OEM_PLUS
+[ / Shift+[         VK_OEM_4
+] / Shift+]         VK_OEM_6
+\ / Shift+\         VK_OEM_5
+; / Shift+;         VK_OEM_1
+' / Shift+'         VK_OEM_7
+` / Shift+`         VK_OEM_3
+/ / Shift+/         VK_OEM_2
+```
+
+`Alt`, `Win`, and `Ctrl+Alt` chords are not remapped in v1. Common letter
+shortcuts such as `Ctrl+C`, `Ctrl+V`, and `Ctrl+S` pass through unchanged.
+
 The optional CapsLock-as-Ctrl setting maps CapsLock down/up to left Ctrl
 down/up. While it is enabled, CapsLock is suppressed and does not toggle Caps
 Lock state.
@@ -139,6 +170,9 @@ Lock state.
 Symbol width can be `Auto`, `ASCII`, or `Fullwidth`. `Auto` is the default and
 tries to follow the foreground IME open/conversion status. Fullwidth style can
 be `Japanese` or `Literal`; `Japanese` is the default.
+
+Shortcut overlay can be `On` or `Off`; `On` is the default. It only has an
+effect while US overlay mode is ON.
 
 ## Install At Logon
 
@@ -149,7 +183,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-ove
 `-Install` stores the current script path in a current-user scheduled task. If
 scheduled task registration is blocked, it falls back to a shortcut in the
 current user's Startup folder. Installed autostart begins in JIS/OFF mode unless
-you pass `-StartMode US`.
+you pass `-StartMode US`. It also persists non-default `-SymbolWidth`,
+`-FullwidthStyle`, and `-ShortcutOverlay Off` options used with the install
+command.
 
 To install autostart with US overlay ON and CapsLock-as-Ctrl enabled:
 
@@ -177,7 +213,8 @@ Remove-Item -LiteralPath ".\selftest-sta.log" -Force
 ```
 
 The self-test checks embedded C# compilation, native structure definitions, and
-pure key-mapping cases. It does not install the hook or start the tray daemon.
+pure key-mapping and shortcut-overlay state cases. It does not install the hook
+or start the tray daemon.
 
 Manual test:
 
@@ -188,8 +225,14 @@ Manual test:
 4. Toggle CapsLock-as-Ctrl from the tray menu if needed.
 5. Open tray menu `Layout test`.
 6. Type the expected symbols in Notepad, Edge/Chrome, and any target apps.
-7. Confirm common shortcuts such as `Ctrl+C`, `Ctrl+V`, `Alt+Tab`, and Win-key
-   shortcuts still pass through.
+7. Confirm common shortcuts such as `Ctrl+C`, `Ctrl+V`, `Ctrl+S`, `Alt+Tab`,
+   and Win-key shortcuts still pass through.
+8. In VS Code, check `Ctrl+=`, `Ctrl+Shift+=`, `Ctrl+-`, `Ctrl+\`, and
+   `Ctrl+backtick` from the US physical keyboard.
+9. In a browser, check `Ctrl+=`, `Ctrl+Shift+=`, `Ctrl+-`, and repeat behavior
+   while holding the key.
+10. Toggle tray menu `Shortcut overlay` OFF and confirm those Ctrl+symbol
+    chords return to the original JIS-layout shortcut behavior.
 
 For Auto symbol-width issues, choose tray menu `IME diagnostics`, then focus the
 target input field within 3 seconds and open the log. The diagnostic entry
@@ -222,6 +265,9 @@ titles, URLs, clipboard content, command lines, or full filesystem paths.
 - Automatic fullwidth detection depends on the foreground app and IME exposing
   open/conversion status through Windows IMM APIs. If it does not follow
   correctly, use tray menu `Symbol width Fullwidth` or `Symbol width ASCII`.
+- Shortcut overlay covers only `Ctrl` plus fixed US OEM symbol-key positions.
+  It does not remap `Alt`, `Win`, `Ctrl+Alt`, Shift-number symbols, or
+  app-specific unmodified command keys such as `/` search shortcuts.
 - Tray menu `IME diagnostics` can help compare the direct IMM and default IME
   window state exposed by the foreground app without logging typed content.
 - If `Ctrl+Alt+F12` is already registered by another app, the tray menu still

@@ -49,9 +49,17 @@ For project background, see `docs/PROJECT_CONTEXT.md`.
 
 - Use `WH_KEYBOARD_LL` and `KBDLLHOOKSTRUCT.scanCode` for physical key position
   mapping.
-- Ignore injected input via `LLKHF_INJECTED` to avoid recursive remapping.
-- Do not remap when `Ctrl`, `Alt`, or `Win` is pressed; preserve shortcuts.
-- Treat `Shift` only as a symbol variant selector.
+- Mark own `SendInput` events with `dwExtraInfo` and ignore those injected
+  events before updating modifier state. Treat other injected input as
+  pass-through to avoid recursive remapping.
+- Preserve shortcuts by default, but allow the narrow Ctrl shortcut overlay:
+  while US overlay and shortcut overlay are ON, remap only fixed unextended US
+  OEM symbol-key positions to matching `VK_OEM_*` key events. Leave letter
+  shortcuts, `Alt`, `Win`, and `Ctrl+Alt` chords alone.
+- Track active shortcut remaps from keydown through keyup, and release all
+  active target keys when shortcut overlay, US overlay, the hook, or the daemon
+  turns off.
+- For text symbol mapping, treat `Shift` only as a symbol variant selector.
 - Leave extended keys alone, including numpad division.
 - Keep symbol width handling separate from US overlay mode. `Auto` should
   best-effort follow foreground IME open/conversion status; `ASCII` and
@@ -74,6 +82,8 @@ For project background, see `docs/PROJECT_CONTEXT.md`.
   CapsLock and send left Ctrl down/up only while enabled.
 - Track physical Ctrl state so CapsLock-as-Ctrl does not release a Ctrl key that
   the user is still holding.
+- Track left/right Ctrl, Alt, Win, and Shift separately; include the synthetic
+  CapsLock-as-Ctrl state only when computing whether Ctrl is down.
 - Release synthetic Ctrl if CapsLock-as-Ctrl is disabled or the hook is
   uninstalled.
 - v1 maps only the fixed US symbol overlay set documented in
@@ -93,13 +103,18 @@ Manual functional checks require an interactive Windows desktop:
 - Start the daemon with `-STA`.
 - Use the tray menu or `Ctrl+Alt+F12` to toggle US overlay.
 - Use the tray menu to toggle CapsLock-as-Ctrl.
+- Use the tray menu to toggle Shortcut overlay if shortcut behavior is under
+  test.
 - Open `Layout test` from the tray menu.
+- Verify `Ctrl+=`, `Ctrl+Shift+=`, `Ctrl+-`, `Ctrl+\`, and `Ctrl+backtick` in
+  VS Code or a comparable app when shortcut overlay behavior changed.
 - Verify key output in Notepad, Edge/Chrome, and representative target apps when
   possible.
 
 ## Known Limits
 
 - The overlay affects all keyboards while ON.
+- Shortcut overlay affects all keyboards while US overlay is ON.
 - It will not work on UAC secure desktop prompts.
 - It may not work in elevated applications because `SendInput` is subject to
   Windows integrity-level restrictions.
