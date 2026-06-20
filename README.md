@@ -83,10 +83,16 @@ powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbo
 ```
 
 Symbol width defaults to `Auto`. In this mode the daemon checks the foreground
-IME open/conversion status and sends fullwidth symbols such as `＠`, `？`, and
-`：` when the IME reports full-shape input, or native Japanese input that is not
-half-width Katakana. Use tray menu `Symbol width ASCII` or `Symbol width
-Fullwidth` to force either behavior.
+IME open/conversion status and sends fullwidth/Japanese-style symbols such as
+`＠`, `？`, `「`, `」`, and `・` when the IME reports full-shape input, or
+native Japanese input that is not half-width Katakana. Use tray menu `Symbol
+width ASCII` or `Symbol width Fullwidth` to force either behavior.
+
+Fullwidth style defaults to `Japanese`, which keeps US-symbol behavior but uses
+Japanese IME-style symbols for selected keys: `[` becomes `「`, `]` becomes
+`」`, and `/` becomes `・`. Use tray menu `Fullwidth style Literal` or pass
+`-FullwidthStyle Literal` to restore literal fullwidth equivalents such as `［`,
+`］`, and `／`.
 
 You can also force it from PowerShell:
 
@@ -94,29 +100,36 @@ You can also force it from PowerShell:
 powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-overlay.ps1" -StartMode US -SymbolWidth Fullwidth
 ```
 
+To force the previous literal fullwidth style:
+
+```powershell
+powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-overlay.ps1" -StartMode US -SymbolWidth Fullwidth -FullwidthStyle Literal
+```
+
 ## What Gets Remapped
 
-Only these symbol positions are remapped. The table shows the ASCII base output;
-Symbol Width may emit fullwidth equivalents. Letters, IME behavior, shortcuts,
-and all other keys are intentionally left alone.
+Only these symbol positions are remapped. The table shows the ASCII base output
+and the default Japanese fullwidth output. `-FullwidthStyle Literal` changes
+`「`, `」`, and `・` back to `［`, `］`, and `／`. Letters, IME behavior,
+shortcuts, and all other keys are intentionally left alone.
 
 ```text
-Physical key        US overlay output
-Shift+2             @
-Shift+6             ^
-Shift+7             &
-Shift+8             *
-Shift+9             (
-Shift+0             )
-- / Shift+-         - / _
-= / Shift+=         = / +
-[ / Shift+[         [ / {
-] / Shift+]         ] / }
-\ / Shift+\         \ / |
-; / Shift+;         ; / :
-' / Shift+'         ' / "
-` / Shift+`         ` / ~
-/ / Shift+/         / / ?
+Physical key        ASCII output   Japanese fullwidth output
+Shift+2             @              ＠
+Shift+6             ^              ＾
+Shift+7             &              ＆
+Shift+8             *              ＊
+Shift+9             (              （
+Shift+0             )              ）
+- / Shift+-         - / _          － / ＿
+= / Shift+=         = / +          ＝ / ＋
+[ / Shift+[         [ / {          「 / ｛
+] / Shift+]         ] / }          」 / ｝
+\ / Shift+\         \ / |          ＼ / ｜
+; / Shift+;         ; / :          ； / ：
+' / Shift+'         ' / "          ＇ / ＂
+` / Shift+`         ` / ~          ｀ / ～
+/ / Shift+/         / / ?          ・ / ？
 ```
 
 The optional CapsLock-as-Ctrl setting maps CapsLock down/up to left Ctrl
@@ -124,7 +137,8 @@ down/up. While it is enabled, CapsLock is suppressed and does not toggle Caps
 Lock state.
 
 Symbol width can be `Auto`, `ASCII`, or `Fullwidth`. `Auto` is the default and
-tries to follow the foreground IME open/conversion status.
+tries to follow the foreground IME open/conversion status. Fullwidth style can
+be `Japanese` or `Literal`; `Japanese` is the default.
 
 ## Install At Logon
 

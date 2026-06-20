@@ -12,6 +12,8 @@ The intended v1 behavior is manual switching:
 - Optional CapsLock-as-Ctrl remapping for users who prefer Ctrl on CapsLock.
 - Symbol width mode `Auto` by default, with manual `ASCII` and `Fullwidth`
   overrides.
+- Fullwidth style `Japanese` by default, with `Literal` available for plain
+  fullwidth ASCII-symbol equivalents.
 - No administrator-only changes.
 - No PowerToys, AutoHotkey, custom driver, or service dependency.
 
@@ -66,45 +68,53 @@ The included VBS launcher starts with US overlay ON and passes
 `-SymbolWidth Auto` is the default. In Auto mode, the daemon first checks the
 foreground IME open status and conversion status through direct IMM context
 probing. If that is unavailable, it falls back to the foreground window's
-default IME window via `WM_IME_CONTROL`. It emits fullwidth symbols when the IME
-is open and either `IME_CMODE_FULLSHAPE` is reported or `IME_CMODE_NATIVE` is
-reported without `IME_CMODE_KATAKANA`. `-SymbolWidth ASCII` always emits ASCII
-symbols, and `-SymbolWidth Fullwidth` always emits fullwidth equivalents.
+default IME window via `WM_IME_CONTROL`. It emits fullwidth/Japanese-style
+symbols when the IME is open and either `IME_CMODE_FULLSHAPE` is reported or
+`IME_CMODE_NATIVE` is reported without `IME_CMODE_KATAKANA`. `-SymbolWidth
+ASCII` always emits ASCII symbols, and `-SymbolWidth Fullwidth` always emits
+fullwidth output.
+
+`-FullwidthStyle Japanese` is the default and uses Japanese IME-style output for
+selected unshifted keys: `[` -> `「`, `]` -> `」`, and `/` -> `・`.
+`-FullwidthStyle Literal` keeps the older literal fullwidth equivalents:
+`[` -> `［`, `]` -> `］`, and `/` -> `／`.
 
 This is best-effort because some apps and modern IME paths may not expose the
-expected IMM conversion status. The tray menu can switch among Auto, ASCII, and
-Fullwidth at runtime.
+expected IMM conversion status. The tray menu can switch among Auto, ASCII,
+Fullwidth, Japanese style, and Literal style at runtime.
 
 ## Mapped Keys
 
-US overlay mode maps this fixed set. The table shows the ASCII base output;
-Symbol Width may emit fullwidth equivalents.
+US overlay mode maps this fixed set. The table shows the ASCII base output and
+the default Japanese fullwidth output. `-FullwidthStyle Literal` changes `「`,
+`」`, and `・` back to `［`, `］`, and `／`.
 
 ```text
-Shift+2  -> @
-Shift+6  -> ^
-Shift+7  -> &
-Shift+8  -> *
-Shift+9  -> (
-Shift+0  -> )
-SC00C    -> -
-Shift+SC00C -> _
-SC00D    -> =
-Shift+SC00D -> +
-SC01A    -> [
-Shift+SC01A -> {
-SC01B    -> ]
-Shift+SC01B -> }
-SC02B    -> \
-Shift+SC02B -> |
-SC027    -> ;
-Shift+SC027 -> :
-SC028    -> '
-Shift+SC028 -> "
-SC029    -> `
-Shift+SC029 -> ~
-SC035    -> /
-Shift+SC035 -> ?
+Physical       ASCII    Japanese fullwidth
+Shift+2        @        ＠
+Shift+6        ^        ＾
+Shift+7        &        ＆
+Shift+8        *        ＊
+Shift+9        (        （
+Shift+0        )        ）
+SC00C          -        －
+Shift+SC00C    _        ＿
+SC00D          =        ＝
+Shift+SC00D    +        ＋
+SC01A          [        「
+Shift+SC01A    {        ｛
+SC01B          ]        」
+Shift+SC01B    }        ｝
+SC02B          \        ＼
+Shift+SC02B    |        ｜
+SC027          ;        ；
+Shift+SC027    :        ：
+SC028          '        ＇
+Shift+SC028    "        ＂
+SC029          `        ｀
+Shift+SC029    ~        ～
+SC035          /        ・
+Shift+SC035    ?        ？
 ```
 
 While US overlay is ON, these mappings apply globally to the current user
@@ -161,6 +171,12 @@ Force fullwidth symbol output:
 
 ```powershell
 powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-overlay.ps1" -StartMode US -SymbolWidth Fullwidth
+```
+
+PowerShell equivalent for literal fullwidth symbols:
+
+```powershell
+powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File ".\win-jis-us-symbol-overlay.ps1" -StartMode US -SymbolWidth Fullwidth -FullwidthStyle Literal
 ```
 
 Capture foreground IME diagnostics:

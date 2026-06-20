@@ -7,6 +7,9 @@ param(
     [ValidateSet("Auto", "ASCII", "Fullwidth")]
     [string]$SymbolWidth = "Auto",
 
+    [ValidateSet("Japanese", "Literal")]
+    [string]$FullwidthStyle = "Japanese",
+
     [switch]$Install,
     [switch]$Uninstall,
     [switch]$CreateShortcuts,
@@ -72,7 +75,10 @@ function New-DaemonArguments {
         [bool]$CapsLockAsCtrl,
 
         [ValidateSet("Auto", "ASCII", "Fullwidth")]
-        [string]$SymbolWidth = "Auto"
+        [string]$SymbolWidth = "Auto",
+
+        [ValidateSet("Japanese", "Literal")]
+        [string]$FullwidthStyle = "Japanese"
     )
 
     $arguments = '-STA -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $ScriptPath
@@ -86,6 +92,10 @@ function New-DaemonArguments {
 
     if ($SymbolWidth -ne "Auto") {
         $arguments += " -SymbolWidth $SymbolWidth"
+    }
+
+    if ($FullwidthStyle -ne "Japanese") {
+        $arguments += " -FullwidthStyle $FullwidthStyle"
     }
 
     return $arguments
@@ -165,7 +175,7 @@ function Install-WinJisUsSymbolOverlayDaemon {
 
     $powerShellPath = Get-WindowsPowerShellPath
     $iconPath = Get-IconPathForScript -ScriptPath $scriptPath
-    $arguments = New-DaemonArguments -ScriptPath $scriptPath -StartMode $StartMode -CapsLockAsCtrl ([bool]$CapsLockAsCtrl) -SymbolWidth $SymbolWidth
+    $arguments = New-DaemonArguments -ScriptPath $scriptPath -StartMode $StartMode -CapsLockAsCtrl ([bool]$CapsLockAsCtrl) -SymbolWidth $SymbolWidth -FullwidthStyle $FullwidthStyle
 
     try {
         $action = New-ScheduledTaskAction -Execute $powerShellPath -Argument $arguments
@@ -220,7 +230,7 @@ function New-WinJisUsSymbolOverlayLaunchShortcuts {
         -ShortcutPath (Join-Path $scriptDir "win-jis-us-symbol-overlay.lnk") `
         -ScriptPath $scriptPath `
         -PowerShellPath $powerShellPath `
-        -Arguments (New-DaemonArguments -ScriptPath $scriptPath -StartMode US -CapsLockAsCtrl $true -SymbolWidth $SymbolWidth) `
+        -Arguments (New-DaemonArguments -ScriptPath $scriptPath -StartMode US -CapsLockAsCtrl $true -SymbolWidth $SymbolWidth -FullwidthStyle $FullwidthStyle) `
         -Description "Start win-jis-us-symbol-overlay with US overlay ON" `
         -IconPath $iconPath
 }
@@ -371,6 +381,12 @@ namespace WinJisUsSymbolOverlay
         Auto,
         Ascii,
         Fullwidth
+    }
+
+    internal enum FullwidthStyleMode
+    {
+        Japanese,
+        Literal
     }
 
     internal enum SymbolWidthDecision
@@ -618,6 +634,7 @@ namespace WinJisUsSymbolOverlay
         private static bool usMode;
         private static bool capsLockAsCtrl;
         private static SymbolWidthMode symbolWidthMode = SymbolWidthMode.Auto;
+        private static FullwidthStyleMode fullwidthStyleMode = FullwidthStyleMode.Japanese;
         private static bool capsLockCtrlDown;
         private static bool capsLockCtrlReleasePending;
         private static bool capsLockPhysicalDown;
@@ -648,6 +665,11 @@ namespace WinJisUsSymbolOverlay
         public static SymbolWidthMode SymbolWidth
         {
             get { return symbolWidthMode; }
+        }
+
+        public static FullwidthStyleMode FullwidthStyle
+        {
+            get { return fullwidthStyleMode; }
         }
 
         public static void SetUsMode(bool enabled, string reason)
@@ -728,6 +750,41 @@ namespace WinJisUsSymbolOverlay
             }
 
             parsed = SymbolWidthMode.Auto;
+            return false;
+        }
+
+        public static void SetFullwidthStyleMode(string style, string reason)
+        {
+            FullwidthStyleMode parsed;
+            if (!TryParseFullwidthStyleMode(style, out parsed))
+            {
+                throw new ArgumentException("Unknown fullwidth style mode: " + style, "style");
+            }
+
+            if (fullwidthStyleMode == parsed)
+            {
+                return;
+            }
+
+            fullwidthStyleMode = parsed;
+            Logger.Write("Fullwidth style " + fullwidthStyleMode.ToString() + ". reason=" + reason);
+        }
+
+        private static bool TryParseFullwidthStyleMode(string style, out FullwidthStyleMode parsed)
+        {
+            if (String.Equals(style, "Japanese", StringComparison.OrdinalIgnoreCase))
+            {
+                parsed = FullwidthStyleMode.Japanese;
+                return true;
+            }
+
+            if (String.Equals(style, "Literal", StringComparison.OrdinalIgnoreCase))
+            {
+                parsed = FullwidthStyleMode.Literal;
+                return true;
+            }
+
+            parsed = FullwidthStyleMode.Japanese;
             return false;
         }
 
@@ -864,14 +921,14 @@ namespace WinJisUsSymbolOverlay
 
             char mapped;
             bool shiftDown = IsAnyModifierDown(NativeMethods.VK_LSHIFT, NativeMethods.VK_RSHIFT, NativeMethods.VK_SHIFT);
-            if (!TryMapScanCode(scanCode, shiftDown, false, out mapped))
+            if (!TryMapScanCode(scanCode, shiftDown, false, FullwidthStyleMode.Literal, out mapped))
             {
                 return NativeMethods.CallNextHookEx(hookHandle, nCode, wParam, lParam);
             }
 
             if (ShouldUseFullWidthSymbols())
             {
-                TryMapScanCode(scanCode, shiftDown, true, out mapped);
+                TryMapScanCode(scanCode, shiftDown, true, fullwidthStyleMode, out mapped);
             }
 
             if (SendUnicodeChar(mapped))
@@ -1221,7 +1278,7 @@ namespace WinJisUsSymbolOverlay
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("IME diagnostics begin. No input text, window titles, URLs, clipboard, command lines, or full paths are logged.");
             sb.AppendLine("environment os=" + SafeLogValue(Environment.OSVersion.VersionString) + " process64=" + Environment.Is64BitProcess.ToString() + " os64=" + Environment.Is64BitOperatingSystem.ToString());
-            sb.AppendLine("state usOverlay=" + usMode.ToString() + " capsLockAsCtrl=" + capsLockAsCtrl.ToString() + " symbolWidth=" + GetSymbolWidthModeLabel(symbolWidthMode));
+            sb.AppendLine("state usOverlay=" + usMode.ToString() + " capsLockAsCtrl=" + capsLockAsCtrl.ToString() + " symbolWidth=" + GetSymbolWidthModeLabel(symbolWidthMode) + " fullwidthStyle=" + fullwidthStyleMode.ToString());
 
             IntPtr foreground = NativeMethods.GetForegroundWindow();
             uint foregroundPid;
@@ -1575,7 +1632,7 @@ namespace WinJisUsSymbolOverlay
             return false;
         }
 
-        private static bool TryMapScanCode(int scanCode, bool shift, bool fullWidth, out char value)
+        private static bool TryMapScanCode(int scanCode, bool shift, bool fullWidth, FullwidthStyleMode fullwidthStyle, out char value)
         {
             value = '\0';
 
@@ -1630,9 +1687,21 @@ namespace WinJisUsSymbolOverlay
                     value = fullWidth ? (shift ? '\uFF0B' : '\uFF1D') : (shift ? '+' : '=');
                     return true;
                 case 0x1A:
+                    if (fullWidth && !shift && fullwidthStyle == FullwidthStyleMode.Japanese)
+                    {
+                        value = '\u300C';
+                        return true;
+                    }
+
                     value = fullWidth ? (shift ? '\uFF5B' : '\uFF3B') : (shift ? '{' : '[');
                     return true;
                 case 0x1B:
+                    if (fullWidth && !shift && fullwidthStyle == FullwidthStyleMode.Japanese)
+                    {
+                        value = '\u300D';
+                        return true;
+                    }
+
                     value = fullWidth ? (shift ? '\uFF5D' : '\uFF3D') : (shift ? '}' : ']');
                     return true;
                 case 0x2B:
@@ -1648,6 +1717,12 @@ namespace WinJisUsSymbolOverlay
                     value = fullWidth ? (shift ? '\uFF5E' : '\uFF40') : (shift ? '~' : '`');
                     return true;
                 case 0x35:
+                    if (fullWidth && !shift && fullwidthStyle == FullwidthStyleMode.Japanese)
+                    {
+                        value = '\u30FB';
+                        return true;
+                    }
+
                     value = fullWidth ? (shift ? '\uFF1F' : '\uFF0F') : (shift ? '?' : '/');
                     return true;
                 default:
@@ -1754,12 +1829,16 @@ namespace WinJisUsSymbolOverlay
             AssertMap(0x0D, true, true, '\uFF0B');
             AssertMap(0x1A, false, false, '[');
             AssertMap(0x1A, false, true, '\uFF3B');
+            AssertMapStyle(0x1A, false, true, FullwidthStyleMode.Japanese, '\u300C');
             AssertMap(0x1A, true, false, '{');
             AssertMap(0x1A, true, true, '\uFF5B');
+            AssertMapStyle(0x1A, true, true, FullwidthStyleMode.Japanese, '\uFF5B');
             AssertMap(0x1B, false, false, ']');
             AssertMap(0x1B, false, true, '\uFF3D');
+            AssertMapStyle(0x1B, false, true, FullwidthStyleMode.Japanese, '\u300D');
             AssertMap(0x1B, true, false, '}');
             AssertMap(0x1B, true, true, '\uFF5D');
+            AssertMapStyle(0x1B, true, true, FullwidthStyleMode.Japanese, '\uFF5D');
             AssertMap(0x2B, false, false, '\\');
             AssertMap(0x2B, false, true, '\uFF3C');
             AssertMap(0x2B, true, false, '|');
@@ -1778,23 +1857,30 @@ namespace WinJisUsSymbolOverlay
             AssertMap(0x29, true, true, '\uFF5E');
             AssertMap(0x35, false, false, '/');
             AssertMap(0x35, false, true, '\uFF0F');
+            AssertMapStyle(0x35, false, true, FullwidthStyleMode.Japanese, '\u30FB');
             AssertMap(0x35, true, false, '?');
             AssertMap(0x35, true, true, '\uFF1F');
+            AssertMapStyle(0x35, true, true, FullwidthStyleMode.Japanese, '\uFF1F');
         }
 
         private static void AssertMap(int scanCode, bool shift, bool fullWidth, char expected)
         {
+            AssertMapStyle(scanCode, shift, fullWidth, FullwidthStyleMode.Literal, expected);
+        }
+
+        private static void AssertMapStyle(int scanCode, bool shift, bool fullWidth, FullwidthStyleMode fullwidthStyle, char expected)
+        {
             char actual;
-            if (!TryMapScanCode(scanCode, shift, fullWidth, out actual) || actual != expected)
+            if (!TryMapScanCode(scanCode, shift, fullWidth, fullwidthStyle, out actual) || actual != expected)
             {
-                throw new InvalidOperationException("Mapping test failed for scanCode=" + scanCode.ToString("X2") + " shift=" + shift.ToString() + " fullWidth=" + fullWidth.ToString());
+                throw new InvalidOperationException("Mapping test failed for scanCode=" + scanCode.ToString("X2") + " shift=" + shift.ToString() + " fullWidth=" + fullWidth.ToString() + " fullwidthStyle=" + fullwidthStyle.ToString());
             }
         }
 
         private static void AssertNoMap(int scanCode, bool shift, bool fullWidth)
         {
             char actual;
-            if (TryMapScanCode(scanCode, shift, fullWidth, out actual))
+            if (TryMapScanCode(scanCode, shift, fullWidth, FullwidthStyleMode.Literal, out actual))
             {
                 throw new InvalidOperationException("Unexpected mapping for scanCode=" + scanCode.ToString("X2") + " shift=" + shift.ToString() + " fullWidth=" + fullWidth.ToString());
             }
@@ -1885,20 +1971,23 @@ namespace WinJisUsSymbolOverlay
         private readonly ToolStripMenuItem symbolWidthAutoItem;
         private readonly ToolStripMenuItem symbolWidthAsciiItem;
         private readonly ToolStripMenuItem symbolWidthFullwidthItem;
+        private readonly ToolStripMenuItem fullwidthStyleJapaneseItem;
+        private readonly ToolStripMenuItem fullwidthStyleLiteralItem;
         private readonly HotkeyWindow hotkeyWindow;
         private readonly System.Windows.Forms.Timer capsCtrlReleaseRetryTimer;
         private readonly System.Windows.Forms.Timer imeDiagnosticsTimer;
         private readonly Icon customIcon;
         private bool disposed;
 
-        public TrayContext(string startMode, bool capsLockAsCtrl, string symbolWidth, string logPath, string iconPath)
+        public TrayContext(string startMode, bool capsLockAsCtrl, string symbolWidth, string fullwidthStyle, string logPath, string iconPath)
         {
             Logger.Configure(logPath);
-            Logger.Write("win-jis-us-symbol-overlay daemon starting. startMode=" + startMode + " capsLockAsCtrl=" + capsLockAsCtrl.ToString() + " symbolWidth=" + symbolWidth);
+            Logger.Write("win-jis-us-symbol-overlay daemon starting. startMode=" + startMode + " capsLockAsCtrl=" + capsLockAsCtrl.ToString() + " symbolWidth=" + symbolWidth + " fullwidthStyle=" + fullwidthStyle);
 
             KeyboardHook.SetUsMode(String.Equals(startMode, "US", StringComparison.OrdinalIgnoreCase), "startup");
             KeyboardHook.SetCapsLockAsCtrl(capsLockAsCtrl, "startup");
             KeyboardHook.SetSymbolWidthMode(symbolWidth, "startup");
+            KeyboardHook.SetFullwidthStyleMode(fullwidthStyle, "startup");
             KeyboardHook.Install();
 
             capsCtrlReleaseRetryTimer = new System.Windows.Forms.Timer();
@@ -1927,6 +2016,8 @@ namespace WinJisUsSymbolOverlay
             symbolWidthAutoItem = new ToolStripMenuItem("Symbol width Auto");
             symbolWidthAsciiItem = new ToolStripMenuItem("Symbol width ASCII");
             symbolWidthFullwidthItem = new ToolStripMenuItem("Symbol width Fullwidth");
+            fullwidthStyleJapaneseItem = new ToolStripMenuItem("Fullwidth style Japanese");
+            fullwidthStyleLiteralItem = new ToolStripMenuItem("Fullwidth style Literal");
             ToolStripMenuItem testItem = new ToolStripMenuItem("Layout test");
             ToolStripMenuItem diagnosticsItem = new ToolStripMenuItem("IME diagnostics");
             ToolStripMenuItem logItem = new ToolStripMenuItem("Open log");
@@ -1938,6 +2029,8 @@ namespace WinJisUsSymbolOverlay
             symbolWidthAutoItem.Click += delegate { SetSymbolWidthMode("Auto", "menu"); };
             symbolWidthAsciiItem.Click += delegate { SetSymbolWidthMode("ASCII", "menu"); };
             symbolWidthFullwidthItem.Click += delegate { SetSymbolWidthMode("Fullwidth", "menu"); };
+            fullwidthStyleJapaneseItem.Click += delegate { SetFullwidthStyleMode("Japanese", "menu"); };
+            fullwidthStyleLiteralItem.Click += delegate { SetFullwidthStyleMode("Literal", "menu"); };
             testItem.Click += delegate { ShowLayoutTest(); };
             diagnosticsItem.Click += delegate { ScheduleImeDiagnostics(); };
             logItem.Click += delegate { OpenLog(); };
@@ -1951,6 +2044,8 @@ namespace WinJisUsSymbolOverlay
             menu.Items.Add(symbolWidthAutoItem);
             menu.Items.Add(symbolWidthAsciiItem);
             menu.Items.Add(symbolWidthFullwidthItem);
+            menu.Items.Add(fullwidthStyleJapaneseItem);
+            menu.Items.Add(fullwidthStyleLiteralItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(testItem);
             menu.Items.Add(diagnosticsItem);
@@ -2035,6 +2130,18 @@ namespace WinJisUsSymbolOverlay
             );
         }
 
+        private void SetFullwidthStyleMode(string mode, string reason)
+        {
+            KeyboardHook.SetFullwidthStyleMode(mode, reason);
+            UpdateTray();
+            notifyIcon.ShowBalloonTip(
+                1200,
+                "win-jis-us-symbol-overlay",
+                "Fullwidth style " + KeyboardHook.FullwidthStyle.ToString(),
+                ToolTipIcon.Info
+            );
+        }
+
         private void UpdateTray()
         {
             bool enabled = KeyboardHook.UsMode;
@@ -2044,6 +2151,8 @@ namespace WinJisUsSymbolOverlay
             symbolWidthAutoItem.Checked = KeyboardHook.SymbolWidth == SymbolWidthMode.Auto;
             symbolWidthAsciiItem.Checked = KeyboardHook.SymbolWidth == SymbolWidthMode.Ascii;
             symbolWidthFullwidthItem.Checked = KeyboardHook.SymbolWidth == SymbolWidthMode.Fullwidth;
+            fullwidthStyleJapaneseItem.Checked = KeyboardHook.FullwidthStyle == FullwidthStyleMode.Japanese;
+            fullwidthStyleLiteralItem.Checked = KeyboardHook.FullwidthStyle == FullwidthStyleMode.Literal;
             notifyIcon.Text = enabled ? "win-jis-us-symbol-overlay - US overlay ON" : "win-jis-us-symbol-overlay - US overlay OFF";
         }
 
@@ -2182,11 +2291,11 @@ namespace WinJisUsSymbolOverlay
 
     public static class KeyboardOverlayApp
     {
-        public static void Run(string startMode, bool capsLockAsCtrl, string symbolWidth, string logPath, string iconPath)
+        public static void Run(string startMode, bool capsLockAsCtrl, string symbolWidth, string fullwidthStyle, string logPath, string iconPath)
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new TrayContext(startMode, capsLockAsCtrl, symbolWidth, logPath, iconPath));
+            Application.Run(new TrayContext(startMode, capsLockAsCtrl, symbolWidth, fullwidthStyle, logPath, iconPath));
         }
 
         public static void SelfTest(string logPath)
@@ -2251,7 +2360,7 @@ if (-not $createdMutex) {
 
 try {
     $iconPath = Get-IconPathForScript -ScriptPath (Get-ThisScriptPath)
-    [WinJisUsSymbolOverlay.KeyboardOverlayApp]::Run($StartMode, [bool]$CapsLockAsCtrl, $SymbolWidth, $LogPath, $iconPath)
+    [WinJisUsSymbolOverlay.KeyboardOverlayApp]::Run($StartMode, [bool]$CapsLockAsCtrl, $SymbolWidth, $FullwidthStyle, $LogPath, $iconPath)
 }
 catch {
     Write-StartupLog "Fatal startup/runtime error: $($_.Exception.GetType().FullName): $($_.Exception.Message)"

@@ -56,6 +56,9 @@ For project background, see `docs/PROJECT_CONTEXT.md`.
 - Keep symbol width handling separate from US overlay mode. `Auto` should
   best-effort follow foreground IME open/conversion status; `ASCII` and
   `Fullwidth` are manual overrides.
+- Keep fullwidth style handling separate from symbol width detection. `Japanese`
+  is the default style for fullwidth output, while `Literal` preserves plain
+  fullwidth ASCII-symbol equivalents.
 - In the low-level hook, only query foreground IME state after confirming the
   scan code belongs to the overlay map. Auto fullwidth detection should require
   the foreground IME context to be open and either full-shape or native
